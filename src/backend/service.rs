@@ -255,11 +255,7 @@ impl TaskManager {
         }
     }
 
-    async fn download(
-        &self,
-        id: &str,
-        cancellation: oneshot::Receiver<()>,
-    ) -> Result<RunOutcome> {
+    async fn download(&self, id: &str, cancellation: oneshot::Receiver<()>) -> Result<RunOutcome> {
         let task = self.repository.get(id).await?;
         let (output, temporary) = self.output_paths(&task)?;
         remove_file_if_exists(&temporary).await?;
@@ -278,9 +274,13 @@ impl TaskManager {
             .join(format!(".{}.concat", task.id));
         let downloader = HlsDownloader::new(self.config.concurrent_fragments)?;
         let outcome = match downloader
-            .download(&task.url, &raw, &work_dir, cancellation, move |percentage| {
-                self.set_progress(id, percentage, None)
-            })
+            .download(
+                &task.url,
+                &raw,
+                &work_dir,
+                cancellation,
+                move |percentage| self.set_progress(id, percentage, None),
+            )
             .await
         {
             Ok(outcome) => outcome,

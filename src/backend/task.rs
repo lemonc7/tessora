@@ -141,9 +141,11 @@ mod tests {
         let generated = default_file_name("https://cdn.example.com/videos/master.m3u8");
         assert!(generated.starts_with("master_"), "got {generated}");
         assert_eq!(generated.len(), "master_".len() + 8);
-        assert!(generated
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            generated
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
 
         let first = default_file_name("https://example.com/x/master.m3u8");
         let second = default_file_name("https://example.com/x/master.m3u8");

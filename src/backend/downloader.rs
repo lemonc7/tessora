@@ -91,9 +91,7 @@ mod tests {
         assert!(!is_tessora_temporary_file(Path::new(
             ".episode.550e8400-e29b-41d4-a716-446655440000.mp4"
         )));
-        assert!(!is_tessora_work_directory(Path::new(
-            ".not-a-uuid.work"
-        )));
+        assert!(!is_tessora_work_directory(Path::new(".not-a-uuid.work")));
     }
 
     #[test]

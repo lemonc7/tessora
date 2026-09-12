@@ -11,7 +11,10 @@ use std::{
 use aes::Aes128;
 use cbc::{
     Decryptor,
-    cipher::{BlockDecryptMut, KeyIvInit, block_padding::{NoPadding, Pkcs7}},
+    cipher::{
+        BlockDecryptMut, KeyIvInit,
+        block_padding::{NoPadding, Pkcs7},
+    },
 };
 use m3u8_rs::{KeyMethod, MediaPlaylist, MediaSegment, Playlist};
 use reqwest::{Client, redirect::Policy};
@@ -80,7 +83,8 @@ impl HlsDownloader {
     where
         F: FnMut(f32) -> Result<()>,
     {
-        let base = Url::parse(url).map_err(|error| AppError::Internal(format!("无效的下载地址：{error}")))?;
+        let base = Url::parse(url)
+            .map_err(|error| AppError::Internal(format!("无效的下载地址：{error}")))?;
         let playlist = self.resolve_media_playlist(&base).await?;
         let segments = normalize_segments(playlist);
 
@@ -108,9 +112,10 @@ impl HlsDownloader {
             let path = work_dir.join(format!("{index:06}"));
 
             tasks.spawn(async move {
-                let _guard = permit.acquire_owned().await.map_err(|_| {
-                    AppError::Internal("分片下载并发控制异常".into())
-                })?;
+                let _guard = permit
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| AppError::Internal("分片下载并发控制异常".into()))?;
                 let segment = &prepared[index];
                 let data = fetch_segment(&client, segment).await?;
                 let mut file = File::create(&path).await?;
@@ -439,7 +444,10 @@ mod tests {
         let segments = normalize_segments(playlist);
         assert_eq!(segments.len(), 3);
         for segment in &segments {
-            assert_eq!(segment.key.as_ref().unwrap().method, m3u8_rs::KeyMethod::AES128);
+            assert_eq!(
+                segment.key.as_ref().unwrap().method,
+                m3u8_rs::KeyMethod::AES128
+            );
         }
     }
 }
