@@ -3,6 +3,7 @@ mod db;
 mod downloader;
 mod error;
 mod events;
+mod hls;
 mod media;
 mod service;
 mod task;
@@ -23,7 +24,13 @@ pub(crate) struct AppState {
 
 pub async fn run() -> Result<()> {
     let config = Arc::new(Config::from_env()?);
-    let removed_files = cleanup_stale_temporary_files(&config.download_root)?;
+    let mut removed_files = 0;
+    for root in [
+        config.download_root.as_path(),
+        config.temporary_root.as_path(),
+    ] {
+        removed_files += cleanup_stale_temporary_files(root)?;
+    }
     if removed_files > 0 {
         tracing::info!(removed_files, "removed stale temporary downloads");
     }

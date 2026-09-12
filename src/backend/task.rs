@@ -51,6 +51,35 @@ pub fn normalize_file_name(value: &str) -> Result<String> {
     Ok(format!("{value}.mp4"))
 }
 
+/// Builds a sanitized, unique default file name when the user leaves the field
+/// blank. The URL's last path segment is used as a readable hint, suffixed with
+/// a short random token so the (directory, file_name) uniqueness constraint is
+/// always satisfied.
+pub fn default_file_name(url: &str) -> String {
+    let raw = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.next_back().map(str::to_owned))
+        })
+        .unwrap_or_default();
+    let stem: String = raw
+        .trim_end_matches(".m3u8")
+        .trim_end_matches(".mp4")
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
+        })
+        .collect();
+    let stem = if stem.is_empty() {
+        "download".to_owned()
+    } else {
+        stem
+    };
+    format!("{stem}_{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+}
+
 pub fn normalize_relative_directory(value: &str) -> Result<PathBuf> {
     let value = value.trim().replace('\\', "/");
     let path = Path::new(&value);
@@ -105,5 +134,25 @@ mod tests {
     fn accepts_http_urls_only() {
         assert!(validate_url("https://example.com/video.m3u8").is_ok());
         assert!(validate_url("file:///tmp/video.m3u8").is_err());
+    }
+
+    #[test]
+    fn defaults_file_name_from_url_stem_with_unique_suffix() {
+        let generated = default_file_name("https://cdn.example.com/videos/master.m3u8");
+        assert!(generated.starts_with("master_"), "got {generated}");
+        assert_eq!(generated.len(), "master_".len() + 8);
+        assert!(generated
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+
+        let first = default_file_name("https://example.com/x/master.m3u8");
+        let second = default_file_name("https://example.com/x/master.m3u8");
+        assert_ne!(first, second, "default names must be unique per call");
+    }
+
+    #[test]
+    fn defaults_file_name_when_url_is_unusable() {
+        assert!(default_file_name("not a url").starts_with("download_"));
+        assert!(default_file_name("https://example.com/").starts_with("download_"));
     }
 }

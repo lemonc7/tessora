@@ -90,15 +90,14 @@ pub fn CreateTaskPanel(
                         }
                     }
                     label {
-                        span { class: LABEL, "文件名" }
+                        span { class: LABEL, "文件名（可选）" }
                         div { class: "flex h-11 items-center rounded-xl border border-slate-700 bg-slate-950/80 transition focus-within:border-violet-500 focus-within:ring-4 focus-within:ring-violet-500/10",
                             input {
                                 class: "h-full min-w-0 flex-1 border-0 bg-transparent px-3 text-sm text-slate-100 outline-none placeholder:text-slate-600",
                                 r#type: "text",
-                                placeholder: "例如：第一集",
+                                placeholder: "例如：第一集（留空自动命名）",
                                 value: file_name,
                                 maxlength: 180,
-                                required: true,
                                 oninput: move |event| file_name.set(event.value()),
                             }
                             b { class: "pr-3 text-xs text-slate-500", ".mp4" }
@@ -180,8 +179,6 @@ fn TaskCard(task: DownloadTask, mut refresh: Signal<u64>, events_connected: bool
                                 div { class: "mb-1.5 flex items-center justify-between text-[11px] text-slate-400",
                                     if let Some(total) = progress.total_duration_ms {
                                         span { "{format_duration(progress.processed_duration_ms)} / {format_duration(total)}" }
-                                    } else {
-                                        span { "已处理 {format_duration(progress.processed_duration_ms)}" }
                                     }
                                     if let Some(percentage) = progress.percentage {
                                         span { class: "font-bold text-violet-300", "{percentage:.0}%" }
@@ -201,7 +198,7 @@ fn TaskCard(task: DownloadTask, mut refresh: Signal<u64>, events_connected: bool
                         } else {
                             div { class: "mt-2 flex items-center gap-2 text-[11px] text-slate-400",
                                 span { class: "size-1.5 animate-pulse rounded-full bg-violet-400" }
-                                "正在探测媒体时长…"
+                                "正在准备下载…"
                             }
                         }
                     }

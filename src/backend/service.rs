@@ -20,10 +20,11 @@ use crate::{
         downloader::temporary_output,
         error::{AppError, Result},
         events::TaskEvents,
+        hls::HlsDownloader,
         media::{FfmpegRunner, RunOutcome},
         task::{
-            normalize_file_name, normalize_relative_directory, now_timestamp, resolved_directory,
-            validate_url,
+            default_file_name, normalize_file_name, normalize_relative_directory, now_timestamp,
+            resolved_directory, validate_url,
         },
     },
     contracts::{
@@ -114,7 +115,11 @@ impl TaskManager {
         let url = validate_url(&request.url)?;
         let relative_directory = normalize_relative_directory(&request.directory)?;
         let output_directory = resolved_directory(&self.config.download_root, &relative_directory)?;
-        let file_name = normalize_file_name(&request.file_name)?;
+        let file_name = if request.file_name.trim().is_empty() {
+            normalize_file_name(&default_file_name(&request.url))?
+        } else {
+            normalize_file_name(&request.file_name)?
+        };
         let output = output_directory.join(&file_name);
         if output.exists() {
             return Err(AppError::Validation(
@@ -253,7 +258,7 @@ impl TaskManager {
     async fn download(
         &self,
         id: &str,
-        mut cancellation: oneshot::Receiver<()>,
+        cancellation: oneshot::Receiver<()>,
     ) -> Result<RunOutcome> {
         let task = self.repository.get(id).await?;
         let (output, temporary) = self.output_paths(&task)?;
@@ -261,25 +266,35 @@ impl TaskManager {
         self.repository.set_started(id, now_timestamp()).await?;
         self.events.changed(id);
 
-        let runner = FfmpegRunner::new(&self.config.ffmpeg_bin, &self.config.ffprobe_bin);
-        let total_duration_ms = tokio::select! {
-            _ = &mut cancellation => return Ok(RunOutcome::Cancelled),
-            duration = runner.probe_duration(&task.url) => duration,
-        };
-        self.set_progress(id, 0, total_duration_ms)?;
+        self.set_progress(id, 0.0, None)?;
 
-        let outcome = match runner
-            .run(&task.url, &temporary, cancellation, move |progress| {
-                self.set_progress(id, progress.duration_ms, total_duration_ms)
+        let work_dir = self
+            .config
+            .temporary_root
+            .join(format!(".{}.work", task.id));
+        let raw = self
+            .config
+            .temporary_root
+            .join(format!(".{}.concat", task.id));
+        let downloader = HlsDownloader::new(self.config.concurrent_fragments)?;
+        let outcome = match downloader
+            .download(&task.url, &raw, &work_dir, cancellation, move |percentage| {
+                self.set_progress(id, percentage, None)
             })
             .await
         {
             Ok(outcome) => outcome,
-            Err(error) => return Err(cleanup_after_error(&temporary, error).await),
+            Err(error) => {
+                let _ = remove_file_if_exists(&raw).await;
+                let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                return Err(cleanup_after_error(&temporary, error).await);
+            }
         };
 
         match outcome {
             RunOutcome::Cancelled => {
+                let _ = remove_file_if_exists(&raw).await;
+                let _ = tokio::fs::remove_dir_all(&work_dir).await;
                 if let Err(error) = remove_file_if_exists(&temporary).await {
                     return Err(AppError::Internal(format!(
                         "下载已取消，但临时文件清理失败：{error}"
@@ -287,6 +302,14 @@ impl TaskManager {
                 }
             }
             RunOutcome::Completed => {
+                let remux = FfmpegRunner::new(&self.config.ffmpeg_bin)
+                    .remux_to_mp4(&raw, &temporary)
+                    .await;
+                let _ = remove_file_if_exists(&raw).await;
+                let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                if let Err(error) = remux {
+                    return Err(cleanup_after_error(&temporary, error).await);
+                }
                 let metadata = match tokio::fs::metadata(&temporary).await {
                     Ok(metadata) => metadata,
                     Err(error) => {
@@ -297,7 +320,7 @@ impl TaskManager {
                     let error = AppError::Internal("FFmpeg 生成了空文件".into());
                     return Err(cleanup_after_error(&temporary, error).await);
                 }
-                if let Err(error) = tokio::fs::rename(&temporary, &output).await {
+                if let Err(error) = move_file(&temporary, &output).await {
                     return Err(cleanup_after_error(&temporary, error.into()).await);
                 }
             }
@@ -312,7 +335,7 @@ impl TaskManager {
         if !output.starts_with(&self.config.download_root) {
             return Err(AppError::Validation("输出路径超出下载根目录".into()));
         }
-        let temporary = temporary_output(&output, &task.id);
+        let temporary = temporary_output(&self.config.temporary_root, &output, &task.id);
         Ok((output, temporary))
     }
 
@@ -338,14 +361,17 @@ impl TaskManager {
     fn set_progress(
         &self,
         id: &str,
-        processed_duration_ms: u64,
+        percentage: f32,
         total_duration_ms: Option<u64>,
     ) -> Result<()> {
-        let percentage = calculate_percentage(processed_duration_ms, total_duration_ms);
+        let processed_duration_ms = total_duration_ms
+            .filter(|total| *total > 0)
+            .map(|total| (percentage as f64 / 100.0 * total as f64) as u64)
+            .unwrap_or(0);
         let progress = TaskProgress {
             processed_duration_ms,
             total_duration_ms,
-            percentage,
+            percentage: Some(percentage),
         };
         self.progress
             .write()
@@ -409,30 +435,23 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+// Renames when possible, otherwise copies across filesystems (e.g. container-internal
+// temp dir -> host bind mount) and removes the source, so the whole download is not
+// streamed through a slow bind mount.
+async fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Ok(()) = tokio::fs::rename(from, to).await {
+        return Ok(());
+    }
+    tokio::fs::copy(from, to).await?;
+    tokio::fs::remove_file(from).await?;
+    Ok(())
+}
+
 async fn cleanup_after_error(path: &Path, error: AppError) -> AppError {
     match remove_file_if_exists(path).await {
         Ok(()) => error,
         Err(cleanup_error) => AppError::Internal(format!(
             "{error}；临时文件清理失败，可能需要手动删除：{cleanup_error}"
         )),
-    }
-}
-
-fn calculate_percentage(processed_ms: u64, total_ms: Option<u64>) -> Option<f32> {
-    total_ms
-        .filter(|total| *total > 0)
-        .map(|total| (processed_ms as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as f32)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::calculate_percentage;
-
-    #[test]
-    fn calculates_and_clamps_progress() {
-        assert_eq!(calculate_percentage(30_000, Some(120_000)), Some(25.0));
-        assert_eq!(calculate_percentage(130_000, Some(120_000)), Some(100.0));
-        assert_eq!(calculate_percentage(1, None), None);
-        assert_eq!(calculate_percentage(1, Some(0)), None);
     }
 }
