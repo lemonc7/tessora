@@ -4,3 +4,11 @@
 @theme {
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+
+/* The decorative background glows are positioned with negative offsets so they bleed off the
+   viewport edges. Some mobile browsers (notably iOS Safari) still widen the document for such
+   absolutely-positioned elements, causing horizontal scroll. Clamp the page to the viewport. */
+html,
+body {
+  overflow-x: hidden;
+}

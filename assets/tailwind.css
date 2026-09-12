@@ -968,6 +968,9 @@
     }
   }
 }
+html, body {
+  overflow-x: hidden;
+}
 @property --tw-border-style {
   syntax: "*";
   inherits: false;
