@@ -25,7 +25,7 @@ pub fn CreateTaskPanel(
     let mut message = use_signal(|| None::<(bool, String)>);
 
     rsx! {
-        section { class: "grid overflow-hidden rounded-[1.4rem] border border-white/10 bg-slate-900/80 shadow-2xl shadow-black/20 md:grid-cols-[minmax(220px,.75fr)_minmax(480px,1.8fr)]",
+        section { class: "grid overflow-hidden rounded-[1.4rem] border border-white/10 bg-slate-900/80 shadow-2xl shadow-black/20 md:grid-cols-[minmax(200px,.75fr)_minmax(0,1.8fr)]",
             div { class: "bg-gradient-to-br from-violet-600 to-indigo-800 p-6 sm:p-8",
                 p { class: "mb-1 text-[10px] font-extrabold tracking-[0.16em] text-white/60", "NEW DOWNLOAD" }
                 h2 { class: "text-2xl font-bold tracking-tight", "添加下载" }
@@ -211,7 +211,7 @@ fn TaskCard(task: DownloadTask, mut refresh: Signal<u64>, events_connected: bool
                 }
             }
 
-            div { class: "flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto",
+            div { class: "flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto",
                 if task.status.is_active() {
                     button {
                         class: "min-h-9 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 text-xs font-bold text-rose-300 transition hover:-translate-y-px hover:brightness-110",

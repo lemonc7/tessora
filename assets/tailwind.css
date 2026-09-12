@@ -377,6 +377,9 @@
   .flex-col {
     flex-direction: column;
   }
+  .flex-wrap {
+    flex-wrap: wrap;
+  }
   .place-items-center {
     place-items: center;
   }
@@ -954,9 +957,9 @@
       padding: calc(var(--spacing) * 8);
     }
   }
-  .md\:grid-cols-\[minmax\(220px\,\.75fr\)_minmax\(480px\,1\.8fr\)\] {
+  .md\:grid-cols-\[minmax\(200px\,\.75fr\)_minmax\(0\,1\.8fr\)\] {
     @media (width >= 48rem) {
-      grid-template-columns: minmax(220px,.75fr) minmax(480px,1.8fr);
+      grid-template-columns: minmax(200px,.75fr) minmax(0,1.8fr);
     }
   }
   .md\:py-11 {
