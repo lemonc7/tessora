@@ -1,0 +1,51 @@
+[package]
+name = "tessora"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7.1", features = ["fullstack"] }
+
+gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = [
+  "derive",
+  "macros",
+  "migrate",
+  "runtime-tokio",
+  "sqlite-bundled",
+], optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "process",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "signal",
+], optional = true }
+tokio-util = { version = "0.7", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+  "ansi",
+  "chrono",
+  "env-filter",
+  "fmt",
+], optional = true }
+url = { version = "2", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[features]
+default = []
+web = ["dioxus/web", "dep:gloo-timers"]
+server = [
+  "dioxus/server",
+  "dep:sqlx",
+  "dep:thiserror",
+  "dep:tokio",
+  "dep:tokio-util",
+  "dep:tracing-subscriber",
+  "dep:url",
+  "dep:uuid",
+]

@@ -1,0 +1,50 @@
+name: Docker image
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build amd64 image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Prepare image metadata
+        id: metadata
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "archive=tessora-${version}-amd64.tar" >> "${GITHUB_OUTPUT}"
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: |
+            lemonc7/tessora:${{ steps.metadata.outputs.version }}
+            lemonc7/tessora:latest
+          outputs: type=docker,dest=${{ runner.temp }}/${{ steps.metadata.outputs.archive }}
+          cache-from: type=gha,scope=tessora-amd64
+          cache-to: type=gha,mode=max,scope=tessora-amd64
+          provenance: false
+
+      - name: Upload image
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ runner.temp }}/${{ steps.metadata.outputs.archive }}
+          archive: false

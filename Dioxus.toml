@@ -1,0 +1,19 @@
+[application]
+name = "tessora"
+out_dir = "dist"
+asset_dir = "assets"
+
+[web.app]
+title = "Tessora"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets", "tailwind.css"]
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+style = []
+script = []
