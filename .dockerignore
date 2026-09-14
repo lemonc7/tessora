@@ -5,6 +5,5 @@ target
 dist
 data
 downloads
-app-data
 .DS_Store
 .env

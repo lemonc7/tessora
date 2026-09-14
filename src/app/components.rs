@@ -25,7 +25,7 @@ pub fn CreateTaskPanel(
     let mut message = use_signal(|| None::<(bool, String)>);
 
     rsx! {
-        section { class: "grid overflow-hidden rounded-[1.4rem] border border-white/10 bg-slate-900/80 shadow-2xl shadow-black/20 md:grid-cols-[minmax(200px,.75fr)_minmax(0,1.8fr)]",
+        section { class: "grid min-w-0 overflow-hidden rounded-[1.4rem] border border-white/10 bg-slate-900/80 shadow-2xl shadow-black/20 md:grid-cols-[minmax(200px,.75fr)_minmax(0,1.8fr)]",
             div { class: "bg-gradient-to-br from-violet-600 to-indigo-800 p-6 sm:p-8",
                 p { class: "mb-1 text-[10px] font-extrabold tracking-[0.16em] text-white/60", "NEW DOWNLOAD" }
                 h2 { class: "text-2xl font-bold tracking-tight", "添加下载" }
@@ -33,7 +33,7 @@ pub fn CreateTaskPanel(
             }
 
             form {
-                class: "grid gap-4 p-5 sm:p-7",
+                class: "grid min-w-0 gap-4 p-5 sm:p-7",
                 onsubmit: move |event| {
                     event.prevent_default();
                     if submitting() {
@@ -62,7 +62,7 @@ pub fn CreateTaskPanel(
                     });
                 },
 
-                label {
+                label { class: "min-w-0",
                     span { class: LABEL, "M3U8 链接" }
                     input {
                         class: FIELD,
@@ -74,8 +74,8 @@ pub fn CreateTaskPanel(
                     }
                 }
 
-                div { class: "grid gap-4 sm:grid-cols-2",
-                    label {
+                div { class: "grid min-w-0 gap-4 sm:grid-cols-2",
+                    label { class: "min-w-0",
                         span { class: LABEL, "下载目录" }
                         select {
                             class: FIELD,
@@ -89,7 +89,7 @@ pub fn CreateTaskPanel(
                             }
                         }
                     }
-                    label {
+                    label { class: "min-w-0",
                         span { class: LABEL, "文件名（可选）" }
                         div { class: "flex h-11 items-center rounded-xl border border-slate-700 bg-slate-950/80 transition focus-within:border-violet-500 focus-within:ring-4 focus-within:ring-violet-500/10",
                             input {
@@ -164,8 +164,8 @@ fn TaskCard(task: DownloadTask, mut refresh: Signal<u64>, events_connected: bool
     let task_id_for_delete_file = task.id.clone();
 
     rsx! {
-        article { class: "flex min-h-24 flex-col items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-4 sm:flex-row sm:items-center",
-            div { class: "flex min-w-0 flex-1 items-center gap-3.5",
+        article { class: "flex min-h-24 min-w-0 flex-col items-start justify-between gap-4 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/80 p-4 sm:flex-row sm:items-center",
+            div { class: "flex w-full min-w-0 flex-1 items-center gap-3.5",
                 div { class: "grid size-12 shrink-0 place-items-center rounded-xl bg-violet-500/15 text-[10px] font-black text-violet-300", "MP4" }
                 div { class: "min-w-0 flex-1",
                     div { class: "flex items-center gap-2.5",

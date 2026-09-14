@@ -20,6 +20,7 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
     && cargo binstall dioxus-cli@0.7.10 -y --force
 
 COPY . .
+
 RUN dx bundle --package tessora --release \
     @client --platform web \
     @server --platform server --target x86_64-unknown-linux-musl

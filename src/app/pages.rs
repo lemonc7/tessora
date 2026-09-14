@@ -22,17 +22,21 @@ pub fn Home() -> Element {
     };
     let live_connected = live_events.connected();
 
+    // Keep the page width arithmetic out of a Tailwind arbitrary-value class. The production CSS
+    // optimizer can remove calc() here and turn `min(..., calc(...))` into an invalid declaration.
     rsx! {
-        div { class: "relative min-h-screen overflow-hidden bg-[#090b10] font-sans text-indigo-50 antialiased",
+        div { class: "relative min-h-screen w-full overflow-hidden bg-[#090b10] font-sans text-indigo-50 antialiased",
             div { class: "pointer-events-none absolute -left-40 -top-52 size-[38rem] rounded-full bg-violet-700/20 blur-[110px]" }
             div { class: "pointer-events-none absolute -right-40 top-10 size-[30rem] rounded-full bg-emerald-600/10 blur-[110px]" }
 
-            div { class: "relative mx-auto w-[min(1180px,calc(100%-2rem))]",
+            div {
+                class: "relative mx-auto w-full",
+                style: "max-width: 1212px; padding-inline: 1rem;",
                 header { class: "flex items-center gap-4 py-9 md:py-11",
                     div { class: "grid size-14 shrink-0 place-items-center rounded-2xl border border-white/20 bg-gradient-to-br from-violet-500 to-indigo-700 font-serif text-3xl italic shadow-2xl shadow-indigo-900/40",
                         "T"
                     }
-                    div {
+                    div { class: "min-w-0",
                         p { class: "mb-1 text-[10px] font-extrabold tracking-[0.16em] text-slate-500", "SELF-HOSTED MEDIA TOOL" }
                         h1 { class: "text-3xl font-bold tracking-tight", "Tessora" }
                         p { class: "mt-1 hidden text-sm text-slate-400 sm:block", "把 M3U8 资源安静地收进你的媒体库。" }
@@ -45,14 +49,14 @@ pub fn Home() -> Element {
                     }
                 }
 
-                main { class: "grid gap-6",
+                main { class: "grid min-w-0 gap-6",
                     CreateTaskPanel {
                         directories: directory_values,
                         task_refresh,
                         events_connected: live_connected,
                     }
 
-                    section { class: "rounded-[1.4rem] border border-slate-800/90 bg-slate-950/60 p-3 shadow-2xl shadow-black/10 sm:p-6",
+                    section { class: "min-w-0 rounded-[1.4rem] border border-slate-800/90 bg-slate-950/60 p-3 shadow-2xl shadow-black/10 sm:p-6",
                         div { class: "mb-5 flex items-center justify-between",
                             div {
                                 p { class: "mb-1 text-[10px] font-extrabold tracking-[0.16em] text-slate-500", "DOWNLOAD QUEUE" }
