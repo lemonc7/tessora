@@ -10,6 +10,8 @@ pub struct Config {
     pub ffmpeg_bin: String,
     pub concurrent_fragments: usize,
     pub max_concurrent_downloads: usize,
+    pub media_scan_interval_seconds: u64,
+    pub media_settle_seconds: u64,
 }
 
 impl Config {
@@ -52,6 +54,26 @@ impl Config {
             ));
         }
 
+        let media_scan_interval_seconds = env::var("MEDIA_SCAN_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "300".into())
+            .parse::<u64>()
+            .map_err(|_| AppError::Config("MEDIA_SCAN_INTERVAL_SECONDS must be a number".into()))?;
+        if media_scan_interval_seconds > 86_400 {
+            return Err(AppError::Config(
+                "MEDIA_SCAN_INTERVAL_SECONDS must be between 0 and 86400".into(),
+            ));
+        }
+
+        let media_settle_seconds = env::var("MEDIA_SETTLE_SECONDS")
+            .unwrap_or_else(|_| "60".into())
+            .parse::<u64>()
+            .map_err(|_| AppError::Config("MEDIA_SETTLE_SECONDS must be a number".into()))?;
+        if media_settle_seconds > 3_600 {
+            return Err(AppError::Config(
+                "MEDIA_SETTLE_SECONDS must be between 0 and 3600".into(),
+            ));
+        }
+
         Ok(Self {
             download_root,
             temporary_root,
@@ -59,6 +81,8 @@ impl Config {
             ffmpeg_bin: env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into()),
             concurrent_fragments,
             max_concurrent_downloads,
+            media_scan_interval_seconds,
+            media_settle_seconds,
         })
     }
 }

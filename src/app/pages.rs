@@ -1,19 +1,25 @@
 use dioxus::prelude::*;
 
 use crate::app::{
-    api::{list_directories, list_tasks},
-    components::{CreateTaskPanel, TaskList},
+    api::{list_directories, list_media_files, list_tasks},
+    components::{CreateTaskPanel, MediaLibrary, TaskList},
     events::use_task_events,
 };
 
 #[component]
 pub fn Home() -> Element {
     let mut task_refresh = use_signal(|| 0_u64);
+    let media_refresh = use_signal(|| 0_u64);
     let tasks = use_resource(move || {
         let _ = task_refresh();
         list_tasks()
     });
     let directories = use_resource(list_directories);
+    let media_files = use_resource(move || {
+        let _ = task_refresh();
+        let _ = media_refresh();
+        list_media_files(true)
+    });
     let live_events = use_task_events(task_refresh);
 
     let directory_values = match directories.read().as_ref() {
@@ -85,6 +91,19 @@ pub fn Home() -> Element {
                                     refresh: task_refresh,
                                     events_connected: live_connected,
                                 }
+                            },
+                        }
+                    }
+
+
+                    section { class: "min-w-0 rounded-[1.4rem] border border-slate-800/90 bg-slate-950/60 p-3 shadow-2xl shadow-black/10 sm:p-6",
+                        match media_files.read().as_ref() {
+                            None => rsx! { div { class: "rounded-xl border border-dashed border-slate-700 px-5 py-11 text-center text-sm text-slate-500", "正在加载媒体库…" } },
+                            Some(Err(error)) => rsx! {
+                                div { class: "rounded-xl border border-dashed border-rose-900/70 bg-rose-950/20 px-5 py-11 text-center text-sm text-rose-400", "无法读取媒体库：{error}" }
+                            },
+                            Some(Ok(items)) => rsx! {
+                                MediaLibrary { files: items.clone(), refresh: media_refresh }
                             },
                         }
                     }

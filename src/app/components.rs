@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 
 use crate::{
-    app::api::{cancel_task, create_task, delete_task, retry_task},
+    app::api::{cancel_task, create_task, delete_task, retry_task, scan_media_files},
     contracts::{
         api::{CreateTaskRequest, DirectoryEntry},
+        media::{MediaFile, MediaState},
         tasks::{DownloadTask, TaskStatus},
     },
 };
@@ -118,6 +119,96 @@ pub fn CreateTaskPanel(
                     r#type: "submit",
                     disabled: submitting,
                     if submitting() { "正在创建…" } else { "开始下载" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn MediaLibrary(files: Vec<MediaFile>, mut refresh: Signal<u64>) -> Element {
+    let mut scanning = use_signal(|| false);
+    let mut message = use_signal(|| None::<(bool, String)>);
+    let present_count = files
+        .iter()
+        .filter(|file| file.state == MediaState::Present)
+        .count();
+    let missing_count = files.len().saturating_sub(present_count);
+
+    rsx! {
+        div { class: "mb-5 flex flex-wrap items-center justify-between gap-4",
+            div {
+                p { class: "mb-1 text-[10px] font-extrabold tracking-[0.16em] text-slate-500", "MEDIA LIBRARY" }
+                h2 { class: "text-2xl font-bold tracking-tight", "媒体库" }
+                p { class: "mt-1 text-xs text-slate-500", "{present_count} 个文件 · {missing_count} 个缺失" }
+            }
+            button {
+                class: "min-h-9 rounded-lg border border-slate-700 bg-violet-500/15 px-3 text-xs font-bold text-violet-300 transition hover:-translate-y-px hover:brightness-110 disabled:cursor-wait disabled:opacity-50",
+                disabled: scanning,
+                onclick: move |_| {
+                    if scanning() {
+                        return;
+                    }
+                    scanning.set(true);
+                    message.set(None);
+                    spawn(async move {
+                        match scan_media_files().await {
+                            Ok(report) => {
+                                message.set(Some((true, format!(
+                                    "新增 {}，更新 {}，缺失 {}，跳过 {}",
+                                    report.discovered, report.updated, report.missing, report.skipped
+                                ))));
+                                *refresh.write() += 1;
+                            }
+                            Err(error) => message.set(Some((false, error.to_string()))),
+                        }
+                        scanning.set(false);
+                    });
+                },
+                if scanning() { "正在同步…" } else { "同步文件" }
+            }
+        }
+
+        if let Some((success, text)) = message() {
+            div {
+                class: "mb-3 rounded-lg px-3 py-2.5 text-xs",
+                class: if success { "bg-emerald-500/10 text-emerald-300" } else { "bg-rose-500/10 text-rose-300" },
+                "{text}"
+            }
+        }
+
+        if files.is_empty() {
+            div { class: "rounded-xl border border-dashed border-slate-700 px-5 py-11 text-center text-slate-500",
+                h3 { class: "font-bold text-slate-300", "媒体库还是空的" }
+                p { class: "mt-1 text-sm", "把 MP4 文件放进下载目录，然后点击同步文件。" }
+            }
+        } else {
+            div { class: "grid gap-2.5",
+                for file in files {
+                    {
+                        let location = if file.directory.is_empty() {
+                            file.file_name.clone()
+                        } else {
+                            format!("{}/{}", file.directory, file.file_name)
+                        };
+                        let missing = file.state == MediaState::Missing;
+                        rsx! {
+                            article { class: "flex min-w-0 items-center gap-3.5 rounded-2xl border border-slate-800 bg-slate-900/80 p-4",
+                                div { class: if missing { "grid size-12 shrink-0 place-items-center rounded-xl bg-slate-800 text-[10px] font-black text-slate-500" } else { "grid size-12 shrink-0 place-items-center rounded-xl bg-emerald-500/10 text-[10px] font-black text-emerald-300" }, "MP4" }
+                                div { class: "min-w-0 flex-1",
+                                    div { class: "flex items-center gap-2.5",
+                                        h3 { class: "truncate text-sm font-bold text-slate-100", title: "{location}", "{file.file_name}" }
+                                        span { class: if missing { "shrink-0 rounded-md bg-slate-800 px-2 py-1 text-[10px] font-extrabold text-slate-400" } else { "shrink-0 rounded-md bg-emerald-500/10 px-2 py-1 text-[10px] font-extrabold text-emerald-300" }, if missing { "文件缺失" } else { "可用" } }
+                                    }
+                                    p { class: "mt-1.5 truncate text-xs text-slate-500", title: "{location}", "{location}" }
+                                }
+                                div { class: "shrink-0",
+                                    p { class: "text-xs font-semibold text-slate-300", "{format_file_size(file.size_bytes)}" }
+                                    p { class: "mt-1 text-[10px] text-slate-500", "{file.origin.label()}" }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -307,4 +398,19 @@ fn format_duration(milliseconds: u64) -> String {
     let minutes = (seconds % 3_600) / 60;
     let seconds = seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }

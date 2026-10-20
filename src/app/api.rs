@@ -6,6 +6,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::contracts::{
     api::{CreateTaskRequest, DirectoryEntry},
+    media::{MediaFile, ScanReport},
     tasks::{DownloadTask, TaskEvent},
 };
 
@@ -72,4 +73,18 @@ pub async fn delete_task(id: String, delete_file: bool) -> ServerFnResult<()> {
 #[server(state: Extension<crate::backend::AppState>)]
 pub async fn list_directories() -> ServerFnResult<Vec<DirectoryEntry>> {
     state.manager.list_directories().map_err(server_error)
+}
+
+#[server(state: Extension<crate::backend::AppState>)]
+pub async fn list_media_files(include_missing: bool) -> ServerFnResult<Vec<MediaFile>> {
+    state
+        .manager
+        .list_media_files(include_missing)
+        .await
+        .map_err(server_error)
+}
+
+#[server(state: Extension<crate::backend::AppState>)]
+pub async fn scan_media_files() -> ServerFnResult<ScanReport> {
+    state.manager.scan_media_files().await.map_err(server_error)
 }

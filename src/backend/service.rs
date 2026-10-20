@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -11,17 +12,19 @@ use dioxus::logger::tracing;
 use tokio::{
     sync::{Mutex, Semaphore, oneshot},
     task::JoinSet,
+    time::{Duration, sleep},
 };
 
 use crate::{
     backend::{
         config::Config,
-        db::TaskRepository,
+        db::{MediaRepository, TaskRepository},
         downloader::temporary_output,
         error::{AppError, Result},
         events::TaskEvents,
         hls::HlsDownloader,
         media::{FfmpegRunner, RunOutcome},
+        scanner::MediaScanner,
         task::{
             default_file_name, normalize_file_name, normalize_relative_directory, now_timestamp,
             resolved_directory, validate_url,
@@ -29,30 +32,41 @@ use crate::{
     },
     contracts::{
         api::{CreateTaskRequest, DirectoryEntry},
+        media::{MediaFile, ScanReport},
         tasks::{DownloadTask, TaskProgress, TaskStatus},
     },
 };
 
 pub struct TaskManager {
     repository: Arc<TaskRepository>,
+    media_repository: Arc<MediaRepository>,
     config: Arc<Config>,
     semaphore: Arc<Semaphore>,
     cancellations: Mutex<HashMap<String, oneshot::Sender<()>>>,
     progress: RwLock<HashMap<String, TaskProgress>>,
     tasks: Mutex<JoinSet<()>>,
+    scan_lock: Mutex<()>,
+    scan_shutdown: tokio_util::sync::CancellationToken,
     shutting_down: AtomicBool,
     events: TaskEvents,
 }
 
 impl TaskManager {
-    pub fn new(repository: Arc<TaskRepository>, config: Arc<Config>) -> Arc<Self> {
+    pub fn new(
+        repository: Arc<TaskRepository>,
+        media_repository: Arc<MediaRepository>,
+        config: Arc<Config>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             repository,
+            media_repository,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
             config,
             cancellations: Mutex::new(HashMap::new()),
             progress: RwLock::new(HashMap::new()),
             tasks: Mutex::new(JoinSet::new()),
+            scan_lock: Mutex::new(()),
+            scan_shutdown: tokio_util::sync::CancellationToken::new(),
             shutting_down: AtomicBool::new(false),
             events: TaskEvents::default(),
         })
@@ -77,6 +91,7 @@ impl TaskManager {
             return;
         }
         self.close_event_streams();
+        self.scan_shutdown.cancel();
 
         let cancellations = {
             let mut active = self.cancellations.lock().await;
@@ -111,6 +126,55 @@ impl TaskManager {
         Ok(tasks)
     }
 
+    pub async fn list_media_files(&self, include_missing: bool) -> Result<Vec<MediaFile>> {
+        self.media_repository.list(include_missing).await
+    }
+
+    pub async fn scan_media_files(&self) -> Result<ScanReport> {
+        let _guard = self
+            .scan_lock
+            .try_lock()
+            .map_err(|_| AppError::Validation("媒体库正在同步，请稍后再试".into()))?;
+        let started_at = now_timestamp();
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        let scanner = MediaScanner::new(
+            self.config.download_root.clone(),
+            self.config.media_settle_seconds,
+        );
+        let scanned = scanner.scan().await?;
+        self.media_repository
+            .synchronize(&scanned.files, &scan_id, started_at, scanned.skipped)
+            .await
+    }
+
+    pub async fn start_media_scanner(self: &Arc<Self>) {
+        let manager = Arc::clone(self);
+        let interval_seconds = self.config.media_scan_interval_seconds;
+        let shutdown = self.scan_shutdown.clone();
+        let mut tasks = self.tasks.lock().await;
+        tasks.spawn(async move {
+            loop {
+                match manager.scan_media_files().await {
+                    Ok(report) => tracing::info!(
+                        discovered = report.discovered,
+                        updated = report.updated,
+                        missing = report.missing,
+                        skipped = report.skipped,
+                        "media library synchronized"
+                    ),
+                    Err(error) => tracing::warn!(%error, "media library synchronization failed"),
+                }
+                if interval_seconds == 0 {
+                    break;
+                }
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_secs(interval_seconds)) => {}
+                }
+            }
+        });
+    }
+
     pub async fn create_task(self: &Arc<Self>, request: CreateTaskRequest) -> Result<DownloadTask> {
         let url = validate_url(&request.url)?;
         let relative_directory = normalize_relative_directory(&request.directory)?;
@@ -128,6 +192,15 @@ impl TaskManager {
         }
 
         let directory = path_for_storage(&relative_directory);
+        if self
+            .media_repository
+            .present_output_exists(&directory, &file_name)
+            .await?
+        {
+            return Err(AppError::Validation(
+                "目标路径已被媒体库中的文件占用".into(),
+            ));
+        }
         if self
             .repository
             .output_exists(&directory, &file_name)
@@ -190,6 +263,9 @@ impl TaskManager {
         let (output, temporary) = self.output_paths(&task)?;
         if delete_file {
             remove_file_if_exists(&output).await?;
+            self.media_repository
+                .mark_missing(&task.directory, &task.file_name)
+                .await?;
         }
         remove_file_if_exists(&temporary).await?;
         self.repository.delete(id).await?;
@@ -320,8 +396,29 @@ impl TaskManager {
                     let error = AppError::Internal("FFmpeg 生成了空文件".into());
                     return Err(cleanup_after_error(&temporary, error).await);
                 }
-                if let Err(error) = move_file(&temporary, &output).await {
+                if let Err(error) = move_file_without_overwrite(&temporary, &output, &task.id).await
+                {
                     return Err(cleanup_after_error(&temporary, error.into()).await);
+                }
+                match tokio::fs::metadata(&output).await {
+                    Ok(metadata) => {
+                        let modified_at = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|value| value.as_secs() as i64)
+                            .unwrap_or_else(now_timestamp);
+                        if let Err(error) = self
+                            .media_repository
+                            .register_download(&task, metadata.len(), modified_at, now_timestamp())
+                            .await
+                        {
+                            tracing::warn!(task_id = id, %error, "download completed but media indexing failed");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(task_id = id, %error, "download completed but output metadata could not be read")
+                    }
                 }
             }
         }
@@ -435,15 +532,62 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-// Renames when possible, otherwise copies across filesystems (e.g. container-internal
-// temp dir -> host bind mount) and removes the source, so the whole download is not
-// streamed through a slow bind mount.
-async fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    if let Ok(()) = tokio::fs::rename(from, to).await {
-        return Ok(());
+// Stages the completed download on the destination filesystem, then publishes it with
+// a hard link. Creating the link fails atomically if an external writer created the
+// destination while the download was running, so existing media is never overwritten.
+async fn move_file_without_overwrite(from: &Path, to: &Path, task_id: &str) -> std::io::Result<()> {
+    if to.exists() {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "目标文件在下载期间被外部程序创建，未覆盖该文件",
+        ));
     }
-    tokio::fs::copy(from, to).await?;
-    tokio::fs::remove_file(from).await?;
+
+    let stem = to
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    let staged = to.with_file_name(format!(".{stem}.{task_id}.part.mp4"));
+    let moved = match tokio::fs::rename(from, &staged).await {
+        Ok(()) => true,
+        Err(_) => {
+            let copy_result = async {
+                let mut source = tokio::fs::File::open(from).await?;
+                let mut target = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staged)
+                    .await?;
+                tokio::io::copy(&mut source, &mut target).await?;
+                target.sync_all().await
+            }
+            .await;
+            if let Err(error) = copy_result {
+                let _ = tokio::fs::remove_file(&staged).await;
+                return Err(error);
+            }
+            false
+        }
+    };
+
+    if let Err(error) = tokio::fs::hard_link(&staged, to).await {
+        if moved {
+            let _ = tokio::fs::rename(&staged, from).await;
+        } else {
+            let _ = tokio::fs::remove_file(&staged).await;
+        }
+        if error.kind() == ErrorKind::AlreadyExists {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "目标文件在下载期间被外部程序创建，未覆盖该文件",
+            ));
+        }
+        return Err(error);
+    }
+    tokio::fs::remove_file(&staged).await?;
+    if !moved {
+        tokio::fs::remove_file(from).await?;
+    }
     Ok(())
 }
 
@@ -453,5 +597,53 @@ async fn cleanup_after_error(path: &Path, error: AppError) -> AppError {
         Err(cleanup_error) => AppError::Internal(format!(
             "{error}；临时文件清理失败，可能需要手动删除：{cleanup_error}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publishes_without_overwriting_an_existing_file() {
+        let root = std::env::temp_dir().join(format!("tessora-publish-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.mp4");
+        let destination = root.join("destination.mp4");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+
+        let result = move_file_without_overwrite(
+            &source,
+            &destination,
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn publishes_a_completed_file() {
+        let root = std::env::temp_dir().join(format!("tessora-publish-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.mp4");
+        let destination = root.join("destination.mp4");
+        std::fs::write(&source, b"completed").unwrap();
+
+        move_file_without_overwrite(
+            &source,
+            &destination,
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"completed");
+        assert!(!source.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

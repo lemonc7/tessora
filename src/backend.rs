@@ -5,6 +5,7 @@ mod error;
 mod events;
 mod hls;
 mod media;
+mod scanner;
 mod service;
 mod task;
 
@@ -36,7 +37,9 @@ pub async fn run() -> Result<()> {
     }
     let repository = Arc::new(TaskRepository::open(&config.database_path).await?);
     repository.mark_active_tasks_interrupted().await?;
-    let manager = TaskManager::new(Arc::clone(&repository), config);
+    let media_repository = Arc::new(repository.media_repository());
+    let manager = TaskManager::new(Arc::clone(&repository), media_repository, config);
+    manager.start_media_scanner().await;
     let state = AppState {
         manager: Arc::clone(&manager),
     };
