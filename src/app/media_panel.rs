@@ -59,13 +59,15 @@ pub(crate) async fn media_panel_view(cx: &Cx, notice: Signal<String>) -> Result<
                         }
                     )
 
-                    media_results(
-                        query: $(query.get()),
-                        confirming: confirming.clone(),
-                        pending_directory: pending_directory.clone(),
-                        pending_file_name: pending_file_name.clone(),
-                        pending_path: pending_path.clone()
-                    )
+                    <div class="max-h-[60vh] overflow-y-auto">
+                        media_results(
+                            query: $(query.get()),
+                            confirming: confirming.clone(),
+                            pending_directory: pending_directory.clone(),
+                            pending_file_name: pending_file_name.clone(),
+                            pending_path: pending_path.clone()
+                        )
+                    </div>
                 </div>
             )
         )
@@ -134,23 +136,28 @@ async fn media_results(
                         "没有找到媒体文件"
                     </p>
                 } else {
-                    <div class="grid gap-2">
+                    <div class="grid grid-cols-1 gap-2">
                         #[key(file.relative_path())]
                         for file in files {
                             let directory = file.directory.clone();
                             let file_name = file.file_name.clone();
                             let relative_path = file.relative_path();
+                            let subtitle = if directory.is_empty() {
+                                format_size(file.size_bytes)
+                            } else {
+                                format!("{} · {}", directory, format_size(file.size_bytes))
+                            };
 
                             <article
                                 id=(stable_dom_id("media", &relative_path))
                                 class="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3"
                             >
-                                <div class="min-w-0">
+                                <div class="min-w-0 flex-1">
                                     <p class="truncate text-sm font-medium">
-                                        (&relative_path)
+                                        (&file_name)
                                     </p>
-                                    <p class="text-xs text-muted-foreground">
-                                        (format_size(file.size_bytes))
+                                    <p class="truncate text-xs text-muted-foreground">
+                                        (&subtitle)
                                     </p>
                                 </div>
 

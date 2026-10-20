@@ -26,6 +26,7 @@ pub(crate) async fn task_panel_view(cx: &Cx, notice: Signal<String>) -> Result<i
         card(
             card_header(card_title("下载任务"))
             card_content(
+                attrs: attributes! { class="max-h-[60vh] overflow-y-auto" },
                 (live! {
                     let task_manager = manager(cx);
                     let mut events = task_manager.subscribe();
@@ -38,7 +39,7 @@ pub(crate) async fn task_panel_view(cx: &Cx, notice: Signal<String>) -> Result<i
                                     "当前没有下载任务"
                                 </p>
                             } else {
-                                <div class="grid gap-3">
+                                <div class="grid grid-cols-1 gap-3">
                                     #[key(task.id.clone())]
                                     for task in tasks {
                                         let cancel_id = task.id.clone();
@@ -50,7 +51,7 @@ pub(crate) async fn task_panel_view(cx: &Cx, notice: Signal<String>) -> Result<i
                                             class="rounded-lg border border-border bg-background p-4"
                                         >
                                             <div class="flex items-start justify-between gap-4">
-                                                <div class="min-w-0">
+                                                <div class="min-w-0 flex-1">
                                                     <p class="truncate font-medium">(&task.file_name)</p>
                                                     <p class="truncate text-xs text-muted-foreground">
                                                         (&task.url)

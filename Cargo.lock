@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "tessora"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "aes 0.9.3",
  "cbc",

@@ -1,4 +1,4 @@
-use std::{env, fmt, io::IsTerminal};
+use std::{env, fmt};
 
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
@@ -30,6 +30,11 @@ pub fn init() -> Result<()> {
     let filter_value = env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_FILTER.into());
     let filter = EnvFilter::try_new(&filter_value);
 
+    // Docker containers run without a TTY, so terminal detection alone would strip
+    // ANSI colors from `docker logs`. Color by default and honor the `NO_COLOR`
+    // opt-out for plain output.
+    let ansi = env::var_os("NO_COLOR").is_none();
+
     // Install a usable subscriber before reporting configuration errors, so startup
     // failures also use the same structured logging path.
     tracing_subscriber::fmt()
@@ -40,7 +45,7 @@ pub fn init() -> Result<()> {
                 .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER)),
         )
         .with_timer(ZonedTimer(timezone.unwrap_or(chrono_tz::Asia::Shanghai)))
-        .with_ansi(std::io::stdout().is_terminal())
+        .with_ansi(ansi)
         .with_target(true)
         .compact()
         .init();

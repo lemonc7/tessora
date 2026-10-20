@@ -5,7 +5,11 @@ FROM rust:1.98-bookworm AS builder
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        build-essential \
+        musl-tools \
+    && rustup target add x86_64-unknown-linux-musl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -17,17 +21,18 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release --locked \
+    export CARGO_BUILD_TARGET=x86_64-unknown-linux-musl \
+           CC_x86_64_unknown_linux_musl=musl-gcc \
+           CARGO_TARGET_X86_64_UNKNOWN_LINUX_LINKER=musl-gcc \
+    && cargo build --release --locked \
     && topcoat asset bundle --release --bin tessora --out /out/assets \
-    && install -Dm755 target/release/tessora /out/tessora
+    && install -Dm755 target/x86_64-unknown-linux-musl/release/tessora /out/tessora
 
-FROM debian:bookworm-slim AS runtime
+FROM alpine:3.23 AS runtime
 
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 1000 tessora \
-    && useradd --uid 1000 --gid tessora --create-home tessora \
+RUN apk add --no-cache ca-certificates curl ffmpeg \
+    && addgroup -g 1000 tessora \
+    && adduser -D -H -u 1000 -G tessora tessora \
     && mkdir -p /app/assets /data/downloads \
     && chown -R tessora:tessora /app /data
 
