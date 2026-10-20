@@ -1,4 +1,4 @@
-name: Docker image
+name: Docker
 
 on:
   workflow_dispatch:
@@ -11,40 +11,47 @@ permissions:
 
 jobs:
   build:
-    name: Build amd64 image
+    name: Build linux/amd64 image
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Prepare image metadata
+      - name: Prepare version
         id: metadata
+        shell: bash
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#v}"
+            version="${GITHUB_REF_NAME}"
           else
-            version="dev-${GITHUB_SHA::7}"
+            version="manual-${GITHUB_RUN_NUMBER}"
           fi
+          version="$(printf '%s' "${version}" | tr '[:upper:]/' '[:lower:]-' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-120)"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "archive=tessora-${version}-amd64.tar" >> "${GITHUB_OUTPUT}"
 
-      - name: Build image
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker image archive
         uses: docker/build-push-action@v7
         with:
           context: .
+          push: false
+          tags: tessora:${{ steps.metadata.outputs.version }}
           platforms: linux/amd64
-          tags: |
-            lemonc7/tessora:${{ steps.metadata.outputs.version }}
-            lemonc7/tessora:latest
-          outputs: type=docker,dest=${{ runner.temp }}/${{ steps.metadata.outputs.archive }}
-          cache-from: type=gha,scope=tessora-amd64
-          cache-to: type=gha,mode=max,scope=tessora-amd64
-          provenance: false
+          outputs: type=docker,dest=${{ runner.temp }}/tessora-linux-amd64.tar
+          cache-from: type=gha,scope=tessora-docker-amd64
+          cache-to: type=gha,mode=max,scope=tessora-docker-amd64
 
-      - name: Upload image
-        uses: actions/upload-artifact@v7
+      - name: Create checksum
+        working-directory: ${{ runner.temp }}
+        run: sha256sum tessora-linux-amd64.tar > tessora-linux-amd64.tar.sha256
+
+      - name: Upload Docker image archive
+        uses: actions/upload-artifact@v4
         with:
-          path: ${{ runner.temp }}/${{ steps.metadata.outputs.archive }}
-          archive: false
+          name: tessora-${{ steps.metadata.outputs.version }}-linux-amd64
+          path: |
+            ${{ runner.temp }}/tessora-linux-amd64.tar
+            ${{ runner.temp }}/tessora-linux-amd64.tar.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

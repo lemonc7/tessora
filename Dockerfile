@@ -1,47 +1,59 @@
-FROM rust:1.95-slim-trixie AS builder
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.98-bookworm AS builder
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
-        musl-tools \
+    && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl
-
-ENV CC_x86_64_unknown_linux_musl=musl-gcc
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_LINKER=musl-gcc
-
-RUN curl -L --proto '=https' --tlsv1.2 -sSf \
-    https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
-    | bash \
-    && cargo binstall dioxus-cli@0.7.10 -y --force
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install topcoat-cli --version 0.10.0 --locked
 
 COPY . .
 
-RUN dx bundle --package tessora --release \
-    @client --platform web \
-    @server --platform server --target x86_64-unknown-linux-musl
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked \
+    && topcoat asset bundle --release --bin tessora --out /out/assets \
+    && install -Dm755 target/release/tessora /out/tessora
 
-FROM alpine:3.23 AS runtime
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 tessora \
+    && useradd --uid 1000 --gid tessora --create-home tessora \
+    && mkdir -p /app/assets /data/downloads \
+    && chown -R tessora:tessora /app /data
 
 WORKDIR /app
 
-ENV IP=0.0.0.0 \
-    DOWNLOAD_ROOT=/app/downloads \
-    DATABASE_PATH=/app/data/tessora.db \
-    RUST_LOG=info,dioxus_server=warn,hyper_util=warn
+COPY --from=builder --chown=tessora:tessora /out/tessora /app/tessora
+COPY --from=builder --chown=tessora:tessora /out/assets /app/assets
 
-RUN apk add --no-cache ca-certificates ffmpeg \
-    && addgroup -g 1000 tessora \
-    && adduser -D -H -u 1000 -G tessora tessora \
-    && mkdir -p /app/downloads /app/data \
-    && chown -R tessora:tessora /app/downloads /app/data
-
-COPY --from=builder --chown=tessora:tessora /app/dist/ /app/
+ENV HOST=0.0.0.0 \
+    PORT=3000 \
+    TZ=Asia/Shanghai \
+    RUST_LOG=info \
+    DOWNLOAD_ROOT=/data/downloads \
+    TEMP_ROOT=/data/downloads \
+    FFMPEG_BIN=/usr/bin/ffmpeg \
+    MAX_CONCURRENT_DOWNLOADS=2 \
+    CONCURRENT_FRAGMENTS=8 \
+    MEDIA_SETTLE_SECONDS=60
 
 USER tessora
-EXPOSE 8080
-ENTRYPOINT ["/app/server"]
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:3000/ >/dev/null || exit 1
+
+STOPSIGNAL SIGTERM
+
+ENTRYPOINT ["/app/tessora"]

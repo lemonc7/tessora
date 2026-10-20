@@ -2,60 +2,47 @@
 name = "tessora"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
 
 [dependencies]
-dioxus = { version = "0.7.1", features = ["fullstack"] }
-
-aes = { version = "0.8", optional = true }
-cbc = { version = "0.1", features = ["alloc"], optional = true }
-gloo-timers = { version = "0.3", features = ["futures"], optional = true }
-m3u8-rs = { version = "6", optional = true }
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
+m3u8-rs = "6"
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
-], optional = true }
-sqlx = { version = "0.9", default-features = false, features = [
-  "derive",
-  "macros",
-  "migrate",
-  "runtime-tokio",
-  "sqlite-bundled",
-], optional = true }
-thiserror = { version = "2", optional = true }
+] }
+thiserror = "2"
 tokio = { version = "1", features = [
   "fs",
   "io-util",
   "macros",
-  "net",
   "process",
+  "rt",
   "rt-multi-thread",
   "sync",
-  "time",
-  "signal",
-], optional = true }
-tokio-util = { version = "0.7", optional = true }
-tracing-subscriber = { version = "0.3", features = [
-  "ansi",
-  "chrono",
-  "env-filter",
-  "fmt",
-], optional = true }
-url = { version = "2", optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
+] }
+topcoat = { version = "=0.10.0", default-features = false, features = [
+  "asset",
+  "discover",
+  "icon-iconify",
+  "router",
+  "runtime",
+  "serve",
+  "tailwind",
+  "ui",
+  "view",
+  "websocket",
+] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
 
-[features]
-default = []
-web = ["dioxus/web", "dep:gloo-timers"]
-server = [
-  "dioxus/server",
-  "dep:sqlx",
-  "dep:thiserror",
-  "dep:tokio",
-  "dep:tokio-util",
-  "dep:tracing-subscriber",
-  "dep:url",
-  "dep:uuid",
-  "dep:aes",
-  "dep:cbc",
-  "dep:m3u8-rs",
-  "dep:reqwest",
-]
+
+[build-dependencies]
+topcoat = { version = "=0.10.0", default-features = false, features = [
+  "icon-iconify",
+  "tailwind",
+] }

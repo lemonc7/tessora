@@ -1,47 +1,46 @@
 mod app;
-#[cfg(feature = "server")]
-mod backend;
-mod contracts;
+pub mod components;
 
-#[cfg(not(feature = "server"))]
-fn main() {
-    dioxus::launch(app::App);
+use std::sync::Arc;
+
+use tessora::{config::Config, logging, services::TaskManager};
+
+async fn run() -> topcoat::Result<()> {
+    let config = Config::from_env()?;
+    tracing::info!(
+        download_root = %config.download_root.display(),
+        temporary_root = %config.temporary_root.display(),
+        max_concurrent_downloads = config.max_concurrent_downloads,
+        concurrent_fragments = config.concurrent_fragments,
+        "starting tessora"
+    );
+    let manager = TaskManager::new(config);
+
+    let scan = manager.initialize().await?;
+    tracing::info!(
+        media_files = scan.files,
+        skipped_entries = scan.skipped,
+        "media catalog initialized"
+    );
+
+    let result = topcoat::start(app::router(app::AppState {
+        manager: Arc::clone(&manager),
+    }))
+    .await;
+
+    manager.shutdown().await;
+    tracing::info!("tessora stopped");
+    Ok(result?)
 }
 
-#[cfg(feature = "server")]
 #[tokio::main]
-async fn main() -> dioxus::Result<()> {
-    init_tracing();
-    backend::run()
-        .await
-        .map_err(|error| dioxus::CapturedError::msg(error.to_string()))
-}
-
-#[cfg(feature = "server")]
-fn init_tracing() {
-    use dioxus::logger::tracing::{Level, subscriber::set_global_default};
-    use tracing_subscriber::{EnvFilter, fmt, fmt::time::ChronoLocal};
-
-    let level = if cfg!(debug_assertions) {
-        Level::DEBUG
-    } else {
-        Level::INFO
-    };
-    let filter = EnvFilter::builder()
-        .with_default_directive(level.into())
-        .from_env_lossy()
-        .add_directive("dioxus_server=warn".parse().expect("valid log filter"))
-        .add_directive("hyper_util=warn".parse().expect("valid log filter"));
-    let subscriber = fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_owned()))
-        .with_ansi(std::env::var_os("NO_COLOR").is_none());
-
-    let result = if std::env::var_os("DIOXUS_CLI_ENABLED").is_some() {
-        set_global_default(subscriber.without_time().finish())
-    } else {
-        set_global_default(subscriber.finish())
-    };
-    result.expect("tracing subscriber must only be initialized once");
+async fn main() {
+    if let Err(error) = logging::init() {
+        tracing::error!(error = %error, "logging configuration is invalid");
+        std::process::exit(1);
+    }
+    if let Err(error) = run().await {
+        tracing::error!(error = %error, "tessora exited with an error");
+        std::process::exit(1);
+    }
 }
