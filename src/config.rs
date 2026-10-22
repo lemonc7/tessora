@@ -22,7 +22,7 @@ impl Config {
 
         let temporary_root = env::var_os("TEMP_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| download_root.clone());
+            .unwrap_or_else(|| download_root.join(".tessora-temp"));
         std::fs::create_dir_all(&temporary_root)?;
         let temporary_root = temporary_root.canonicalize()?;
 

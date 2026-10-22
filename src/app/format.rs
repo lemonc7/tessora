@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use tessora::domain::TaskStatus;
+use crate::domain::TaskStatus;
 
 pub(crate) fn status_label(status: TaskStatus) -> &'static str {
     match status {

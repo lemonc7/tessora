@@ -79,38 +79,47 @@ impl TaskStore {
         error: Option<String>,
     ) -> Result<()> {
         let mut state = self.state.write().await;
-        let output = {
-            let task = state.tasks.get_mut(id).ok_or(AppError::NotFound)?;
-            task.status = status;
-            task.finished_at = Some(timestamp);
-            task.error = error;
-            task.progress = None;
-            (task.directory.clone(), task.file_name.clone())
-        };
-        if status == TaskStatus::Completed
-            && state
+        if status == TaskStatus::Completed {
+            let task = state.tasks.remove(id).ok_or(AppError::NotFound)?;
+            let output = (task.directory, task.file_name);
+            if state
                 .reserved_outputs
                 .get(&output)
                 .is_some_and(|owner| owner == id)
-        {
-            state.reserved_outputs.remove(&output);
+            {
+                state.reserved_outputs.remove(&output);
+            }
+            return Ok(());
         }
+
+        let task = state.tasks.get_mut(id).ok_or(AppError::NotFound)?;
+        task.status = status;
+        task.finished_at = Some(timestamp);
+        task.error = error;
+        task.progress = None;
         Ok(())
     }
 
-    pub async fn reset_for_retry(&self, id: &str) -> Result<()> {
+    pub async fn reset_for_retry(&self, id: &str) -> Result<DownloadTask> {
         let mut state = self.state.write().await;
         let task = state.tasks.get_mut(id).ok_or(AppError::NotFound)?;
+        if !task.status.can_retry() {
+            return Err(AppError::InvalidState);
+        }
         task.status = TaskStatus::Queued;
         task.error = None;
         task.progress = None;
         task.started_at = None;
         task.finished_at = None;
-        Ok(())
+        Ok(task.clone())
     }
 
-    pub async fn delete(&self, id: &str) -> Result<DownloadTask> {
+    pub async fn delete_inactive(&self, id: &str) -> Result<DownloadTask> {
         let mut state = self.state.write().await;
+        let task = state.tasks.get(id).ok_or(AppError::NotFound)?;
+        if task.status.is_active() {
+            return Err(AppError::Validation("请先取消正在运行的任务".into()));
+        }
         let task = state.tasks.remove(id).ok_or(AppError::NotFound)?;
         let output = (task.directory.clone(), task.file_name.clone());
         if state
@@ -144,7 +153,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserves_output_until_completion_or_deletion() {
+    async fn clears_completed_tasks_and_releases_their_output() {
         let store = TaskStore::default();
         store.reserve_and_insert(task("one")).await.unwrap();
         assert!(store.reserve_and_insert(task("two")).await.is_err());
@@ -153,10 +162,15 @@ mod tests {
             .set_finished("one", TaskStatus::Completed, 2, None)
             .await
             .unwrap();
+        assert!(store.list().await.is_empty());
+
         store.reserve_and_insert(task("two")).await.unwrap();
-        store.delete("one").await.unwrap();
         assert!(store.reserve_and_insert(task("three")).await.is_err());
-        store.delete("two").await.unwrap();
+        store
+            .set_finished("two", TaskStatus::Failed, 3, Some("failed".into()))
+            .await
+            .unwrap();
+        store.delete_inactive("two").await.unwrap();
         store.reserve_and_insert(task("three")).await.unwrap();
     }
 
@@ -173,5 +187,74 @@ mod tests {
         let task = store.get("one").await.unwrap();
         assert_eq!(task.status, TaskStatus::Queued);
         assert_eq!(task.error, None);
+    }
+
+    #[tokio::test]
+    async fn retry_rejects_a_task_that_is_not_currently_retryable() {
+        let store = TaskStore::default();
+        store.reserve_and_insert(task("one")).await.unwrap();
+
+        assert!(matches!(
+            store.reset_for_retry("one").await,
+            Err(AppError::InvalidState)
+        ));
+        assert_eq!(store.get("one").await.unwrap().status, TaskStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_active_tasks_without_releasing_the_output() {
+        let store = TaskStore::default();
+        store.reserve_and_insert(task("one")).await.unwrap();
+
+        assert!(matches!(
+            store.delete_inactive("one").await,
+            Err(AppError::Validation(_))
+        ));
+        assert!(store.get("one").await.is_ok());
+        assert!(store.reserve_and_insert(task("two")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_retry_and_delete_cannot_both_succeed() {
+        let store = std::sync::Arc::new(TaskStore::default());
+        store.reserve_and_insert(task("one")).await.unwrap();
+        store
+            .set_finished("one", TaskStatus::Failed, 2, Some("failed".into()))
+            .await
+            .unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+        let retry = {
+            let store = std::sync::Arc::clone(&store);
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store.reset_for_retry("one").await
+            })
+        };
+        let delete = {
+            let store = std::sync::Arc::clone(&store);
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store.delete_inactive("one").await
+            })
+        };
+        barrier.wait().await;
+
+        let retry = retry.await.unwrap();
+        let delete = delete.await.unwrap();
+        assert_ne!(retry.is_ok(), delete.is_ok());
+        match (retry, delete) {
+            (Ok(task), Err(AppError::Validation(_))) => {
+                assert_eq!(task.status, TaskStatus::Queued);
+                assert_eq!(store.get("one").await.unwrap().status, TaskStatus::Queued);
+            }
+            (Err(AppError::NotFound), Ok(task)) => {
+                assert_eq!(task.status, TaskStatus::Failed);
+                assert!(matches!(store.get("one").await, Err(AppError::NotFound)));
+            }
+            (retry, delete) => panic!("unexpected results: {retry:?}, {delete:?}"),
+        }
     }
 }

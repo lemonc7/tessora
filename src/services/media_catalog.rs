@@ -13,6 +13,28 @@ use crate::{
 
 const MAX_SCAN_DEPTH: usize = 32;
 const MAX_SCAN_FILES: usize = 100_000;
+const MAX_SCAN_ENTRIES: usize = 500_000;
+const MAX_SEARCH_RESULTS: usize = 200;
+
+#[derive(Clone, Copy)]
+struct ScanLimits {
+    depth: usize,
+    files: usize,
+    entries: usize,
+}
+
+const SCAN_LIMITS: ScanLimits = ScanLimits {
+    depth: MAX_SCAN_DEPTH,
+    files: MAX_SCAN_FILES,
+    entries: MAX_SCAN_ENTRIES,
+};
+
+#[derive(Default)]
+struct ScanState {
+    files: Vec<MediaFile>,
+    skipped: usize,
+    entries: usize,
+}
 
 pub struct MediaCatalog {
     root: PathBuf,
@@ -37,11 +59,16 @@ impl MediaCatalog {
 
     pub async fn search(&self, query: &str) -> Vec<MediaFile> {
         let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+
         self.files
             .read()
             .await
             .iter()
-            .filter(|file| query.is_empty() || file.relative_path().to_lowercase().contains(&query))
+            .filter(|file| file.file_name.to_lowercase().contains(&query))
+            .take(MAX_SEARCH_RESULTS)
             .cloned()
             .collect()
     }
@@ -98,18 +125,26 @@ fn scan_root(
     settle_seconds: u64,
     known_files: &HashSet<(String, String)>,
 ) -> Result<(Vec<MediaFile>, usize)> {
-    let mut files = Vec::new();
-    let mut skipped = 0;
+    scan_root_with_limits(root, settle_seconds, known_files, SCAN_LIMITS)
+}
+
+fn scan_root_with_limits(
+    root: &Path,
+    settle_seconds: u64,
+    known_files: &HashSet<(String, String)>,
+    limits: ScanLimits,
+) -> Result<(Vec<MediaFile>, usize)> {
+    let mut state = ScanState::default();
     scan_directory(
         root,
         root,
         0,
         settle_seconds,
         known_files,
-        &mut files,
-        &mut skipped,
+        limits,
+        &mut state,
     )?;
-    Ok((files, skipped))
+    Ok((state.files, state.skipped))
 }
 
 fn scan_directory(
@@ -118,31 +153,37 @@ fn scan_directory(
     depth: usize,
     settle_seconds: u64,
     known_files: &HashSet<(String, String)>,
-    files: &mut Vec<MediaFile>,
-    skipped: &mut usize,
+    limits: ScanLimits,
+    state: &mut ScanState,
 ) -> Result<()> {
-    if depth >= MAX_SCAN_DEPTH {
+    if depth >= limits.depth {
         return Err(AppError::Internal(format!(
-            "媒体目录层级超过 {MAX_SCAN_DEPTH} 层"
-        )));
-    }
-    if files.len() >= MAX_SCAN_FILES {
-        return Err(AppError::Internal(format!(
-            "媒体文件数量超过 {MAX_SCAN_FILES} 个"
+            "媒体目录层级超过 {} 层",
+            limits.depth
         )));
     }
 
-    let mut entries = std::fs::read_dir(current)?.collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(current)? {
+        if state.entries >= limits.entries {
+            return Err(AppError::Internal(format!(
+                "扫描的目录项数量超过 {} 个",
+                limits.entries
+            )));
+        }
+        state.entries += 1;
+        entries.push(entry?);
+    }
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let file_type = entry.file_type()?;
         let path = entry.path();
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            *skipped += 1;
+            state.skipped += 1;
             continue;
         };
         if file_type.is_symlink() || name.starts_with('.') || name.ends_with(".importing") {
-            *skipped += 1;
+            state.skipped += 1;
             continue;
         }
         if file_type.is_dir() {
@@ -152,13 +193,13 @@ fn scan_directory(
                 depth + 1,
                 settle_seconds,
                 known_files,
-                files,
-                skipped,
+                limits,
+                state,
             )?;
             continue;
         }
         if !file_type.is_file() || !name.to_ascii_lowercase().ends_with(".mp4") {
-            *skipped += 1;
+            state.skipped += 1;
             continue;
         }
 
@@ -166,7 +207,7 @@ fn scan_directory(
             .strip_prefix(root)
             .map_err(|_| AppError::Internal("无法生成媒体文件相对路径".into()))?;
         let Some(file_name) = relative.file_name().and_then(|value| value.to_str()) else {
-            *skipped += 1;
+            state.skipped += 1;
             continue;
         };
         let Some(directory) = relative
@@ -177,7 +218,7 @@ fn scan_directory(
             .collect::<Option<Vec<_>>>()
             .map(|parts| parts.join("/"))
         else {
-            *skipped += 1;
+            state.skipped += 1;
             continue;
         };
         let metadata = entry.metadata()?;
@@ -187,14 +228,20 @@ fn scan_directory(
             .map(|age| age.as_secs() >= settle_seconds)
             .unwrap_or(false);
         if !stable && !known_files.contains(&(directory.clone(), file_name.to_owned())) {
-            *skipped += 1;
+            state.skipped += 1;
             continue;
         }
         let modified_at = modified
             .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
             .map(|value| value.as_secs() as i64)
             .unwrap_or_default();
-        files.push(MediaFile {
+        if state.files.len() >= limits.files {
+            return Err(AppError::Internal(format!(
+                "媒体文件数量超过 {} 个",
+                limits.files
+            )));
+        }
+        state.files.push(MediaFile {
             directory,
             file_name: file_name.to_owned(),
             size_bytes: metadata.len(),
@@ -208,9 +255,13 @@ fn scan_directory(
 mod tests {
     use super::*;
 
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("tessora-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
     #[tokio::test]
     async fn scans_and_searches_media_files() {
-        let root = std::env::temp_dir().join(format!("tessora-scan-{}", uuid::Uuid::new_v4()));
+        let root = test_root("scan");
         std::fs::create_dir_all(root.join("shows/season-1")).unwrap();
         std::fs::write(root.join("movie.mp4"), b"movie").unwrap();
         std::fs::write(root.join("shows/season-1/01.MP4"), b"episode").unwrap();
@@ -219,8 +270,83 @@ mod tests {
         let catalog = MediaCatalog::new(root.clone(), 0);
         let report = catalog.scan().await.unwrap();
         assert_eq!(report.files, 2);
-        assert_eq!(catalog.search("SEASON-1").await.len(), 1);
+        assert!(catalog.search("  ").await.is_empty());
+        assert!(catalog.search("SEASON-1").await.is_empty());
+        assert_eq!(catalog.search("01.mp4").await.len(), 1);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enforces_media_file_limit_in_a_single_directory() {
+        let root = test_root("file-limit");
+        std::fs::create_dir(&root).unwrap();
+        for index in 0..3 {
+            std::fs::write(root.join(format!("{index}.mp4")), b"media").unwrap();
+        }
+
+        let result = scan_root_with_limits(
+            &root,
+            0,
+            &HashSet::new(),
+            ScanLimits {
+                depth: MAX_SCAN_DEPTH,
+                files: 2,
+                entries: 10,
+            },
+        );
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("媒体文件数量超过 2 个")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enforces_total_entry_limit_for_non_media_files() {
+        let root = test_root("entry-limit");
+        std::fs::create_dir(&root).unwrap();
+        for index in 0..3 {
+            std::fs::write(root.join(format!("{index}.txt")), b"not media").unwrap();
+        }
+
+        let result = scan_root_with_limits(
+            &root,
+            0,
+            &HashSet::new(),
+            ScanLimits {
+                depth: MAX_SCAN_DEPTH,
+                files: 10,
+                entries: 2,
+            },
+        );
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("扫描的目录项数量超过 2 个")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn limits_search_results() {
+        let catalog = MediaCatalog::new(PathBuf::new(), 0);
+        let mut files = catalog.files.write().await;
+        for index in 0..(MAX_SEARCH_RESULTS + 1) {
+            files.push(MediaFile {
+                directory: "shows".to_owned(),
+                file_name: format!("episode-{index}.mp4"),
+                size_bytes: 0,
+                modified_at: 0,
+            });
+        }
+        drop(files);
+
+        assert_eq!(catalog.search("episode").await.len(), MAX_SEARCH_RESULTS);
     }
 }

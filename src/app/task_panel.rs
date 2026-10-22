@@ -1,4 +1,3 @@
-use tessora::domain::{TaskEvent, TaskStatus};
 use tokio::sync::broadcast;
 use topcoat::{
     Result,
@@ -7,11 +6,14 @@ use topcoat::{
     view::{View, attributes, component, emit, live, view},
 };
 
-use crate::components::{
-    badge::{BadgeVariant, badge},
-    button::{ButtonSize, ButtonVariant, button},
-    card::{card, card_content, card_header, card_title},
-    progress::progress,
+use crate::{
+    components::{
+        badge::{BadgeVariant, badge},
+        button::{ButtonSize, ButtonVariant, button},
+        card::{card, card_content, card_header, card_title},
+        progress::progress,
+    },
+    domain::{TaskEvent, TaskStatus},
 };
 
 use super::{
@@ -28,15 +30,17 @@ pub(crate) async fn task_panel_view(cx: &Cx, notice: Signal<String>) -> Result<i
             card_content(
                 attrs: attributes! { class="max-h-[60vh] overflow-y-auto" },
                 (live! {
+                    // 服务端实时view
                     let task_manager = manager(cx);
                     let mut events = task_manager.subscribe();
 
                     loop {
                         let tasks = task_manager.list_tasks().await?;
+                        // 根据tasks生成界面，emit!要用在live!内部，表示这一轮要发给浏览器的新view
                         let token = emit! {
                             if tasks.is_empty() {
                                 <p class="text-sm text-muted-foreground">
-                                    "当前没有下载任务"
+                                    "当前没有进行中或异常的下载任务"
                                 </p>
                             } else {
                                 <div class="grid grid-cols-1 gap-3">
@@ -138,6 +142,7 @@ pub(crate) async fn task_panel_view(cx: &Cx, notice: Signal<String>) -> Result<i
                             }
                         }?;
 
+                        // 结束返回token，让live!能以最后一版view正常结束
                         if !connected(cx) {
                             break Ok(token);
                         }

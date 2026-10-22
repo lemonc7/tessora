@@ -33,7 +33,8 @@ FROM alpine:3.23 AS runtime
 RUN apk add --no-cache ca-certificates curl ffmpeg \
     && addgroup -g 1000 tessora \
     && adduser -D -H -u 1000 -G tessora tessora \
-    && mkdir -p /app/assets /data/downloads \
+    && mkdir -p /app/assets /data/downloads /data/temp \
+    && chmod 0700 /data/temp \
     && chown -R tessora:tessora /app /data
 
 WORKDIR /app
@@ -46,7 +47,7 @@ ENV HOST=0.0.0.0 \
     TZ=Asia/Shanghai \
     RUST_LOG=info \
     DOWNLOAD_ROOT=/data/downloads \
-    TEMP_ROOT=/data/downloads \
+    TEMP_ROOT=/data/temp \
     FFMPEG_BIN=/usr/bin/ffmpeg \
     MAX_CONCURRENT_DOWNLOADS=2 \
     CONCURRENT_FRAGMENTS=8 \

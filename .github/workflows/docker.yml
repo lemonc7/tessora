@@ -35,7 +35,7 @@ jobs:
         with:
           context: .
           push: false
-          tags: tessora:${{ steps.metadata.outputs.version }}
+          tags: lemonc7/tessora:${{ steps.metadata.outputs.version }}
           platforms: linux/amd64
           outputs: type=docker,dest=${{ runner.temp }}/tessora-linux-amd64.tar
           cache-from: type=gha,scope=tessora-docker-amd64

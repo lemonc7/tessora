@@ -11,6 +11,7 @@ services:
       - MAX_CONCURRENT_DOWNLOADS=2
       - CONCURRENT_FRAGMENTS=8
       - MEDIA_SETTLE_SECONDS=60
+      - TEMP_ROOT=/data/temp
     volumes:
       - ./downloads:/data/downloads
     stop_grace_period: 30s

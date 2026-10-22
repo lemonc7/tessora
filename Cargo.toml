@@ -12,6 +12,7 @@ chrono-tz = "0.10"
 m3u8-rs = "6"
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
+  "stream",
 ] }
 thiserror = "2"
 tokio = { version = "1", features = [
@@ -23,6 +24,7 @@ tokio = { version = "1", features = [
   "rt-multi-thread",
   "sync",
 ] }
+tokio-util = { version = "0.7", features = ["rt"] }
 topcoat = { version = "=0.10.0", default-features = false, features = [
   "asset",
   "discover",

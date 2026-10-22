@@ -2,17 +2,15 @@ use std::{
     collections::HashMap,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{
-        Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, RwLock},
     time::UNIX_EPOCH,
 };
 
 use tokio::{
-    sync::{Mutex, Semaphore, oneshot},
+    sync::{Mutex, Semaphore},
     task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::Config,
@@ -33,11 +31,22 @@ pub struct TaskManager {
     media: Arc<MediaCatalog>,
     config: Arc<Config>,
     semaphore: Arc<Semaphore>,
-    cancellations: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    cancellations: Mutex<HashMap<String, Cancellation>>,
     progress: RwLock<HashMap<String, TaskProgress>>,
-    workers: Mutex<JoinSet<()>>,
-    shutting_down: AtomicBool,
+    workers: Mutex<WorkerState>,
     events: TaskEvents,
+}
+
+struct Cancellation {
+    generation: u64,
+    token: CancellationToken,
+}
+
+#[derive(Default)]
+struct WorkerState {
+    shutting_down: bool,
+    next_generation: u64,
+    workers: JoinSet<()>,
 }
 
 impl TaskManager {
@@ -53,8 +62,7 @@ impl TaskManager {
             config,
             cancellations: Mutex::new(HashMap::new()),
             progress: RwLock::new(HashMap::new()),
-            workers: Mutex::new(JoinSet::new()),
-            shutting_down: AtomicBool::new(false),
+            workers: Mutex::new(WorkerState::default()),
             events: TaskEvents::default(),
         })
     }
@@ -64,34 +72,27 @@ impl TaskManager {
     }
 
     pub async fn initialize(&self) -> Result<ScanReport> {
-        let download_files_removed = cleanup_stale_temporary_files(&self.config.download_root)?;
-        let temporary_files_removed = if self.config.temporary_root != self.config.download_root {
-            cleanup_stale_temporary_files(&self.config.temporary_root)?
-        } else {
-            0
-        };
-        tracing::info!(
-            download_files_removed,
-            temporary_files_removed,
-            "stale temporary files cleaned"
-        );
+        let temporary_files_removed = cleanup_stale_temporary_files(&self.config.temporary_root)?;
+        tracing::info!(temporary_files_removed, "stale temporary files cleaned");
         self.media.scan().await
     }
 
     pub async fn shutdown(&self) {
-        if self.shutting_down.swap(true, Ordering::AcqRel) {
+        let mut state = self.workers.lock().await;
+        if state.shutting_down {
             return;
         }
+        state.shutting_down = true;
+
         let cancellations = {
             let mut active = self.cancellations.lock().await;
             std::mem::take(&mut *active)
         };
         for cancellation in cancellations.into_values() {
-            cancellation.send(()).ok();
+            cancellation.token.cancel();
         }
 
-        let mut workers = self.workers.lock().await;
-        while let Some(result) = workers.join_next().await {
+        while let Some(result) = state.workers.join_next().await {
             if let Err(error) = result {
                 tracing::error!(%error, "download task ended unexpectedly during shutdown");
             }
@@ -130,9 +131,6 @@ impl TaskManager {
     }
 
     pub async fn create_task(self: &Arc<Self>, request: CreateTask) -> Result<DownloadTask> {
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(AppError::InvalidState);
-        }
         let url = validate_url(&request.url)?;
         let relative_directory = normalize_relative_directory(&request.directory)?;
         let output_directory = resolved_directory(&self.config.download_root, &relative_directory)?;
@@ -145,6 +143,11 @@ impl TaskManager {
             return Err(AppError::Validation(
                 "目标文件已经存在，请更换文件名".into(),
             ));
+        }
+
+        let mut workers = self.workers.lock().await;
+        if workers.shutting_down {
+            return Err(AppError::InvalidState);
         }
 
         let task = DownloadTask {
@@ -167,7 +170,7 @@ impl TaskManager {
             file_name = %task.file_name,
             "download task created"
         );
-        self.enqueue(task.id.clone()).await;
+        self.enqueue_locked(task.id.clone(), &mut workers).await;
         Ok(task)
     }
 
@@ -176,37 +179,50 @@ impl TaskManager {
         if !task.status.is_active() {
             return Err(AppError::InvalidState);
         }
-        let sender = self.cancellations.lock().await.remove(id);
-        let Some(sender) = sender else {
+        let cancellation = self.cancellations.lock().await.remove(id);
+        let Some(cancellation) = cancellation else {
             return Err(AppError::InvalidState);
         };
-        sender.send(()).ok();
+        cancellation.token.cancel();
         tracing::info!(task_id = id, "download task cancellation requested");
         Ok(())
     }
 
     pub async fn retry_task(self: &Arc<Self>, id: &str) -> Result<()> {
-        let task = self.store.get(id).await?;
-        if !task.status.can_retry() {
+        let mut workers = self.workers.lock().await;
+        if workers.shutting_down {
             return Err(AppError::InvalidState);
         }
-        let (_, temporary) = self.output_paths(&task)?;
-        remove_file_if_exists(&temporary).await?;
-        self.store.reset_for_retry(id).await?;
+
+        let task = self.store.reset_for_retry(id).await?;
+        let preparation = async {
+            let (_, temporary) = self.output_paths(&task)?;
+            remove_file_if_exists(&temporary).await
+        }
+        .await;
+        if let Err(error) = preparation {
+            let message = error.to_string();
+            if let Err(update_error) = self
+                .store
+                .set_finished(id, TaskStatus::Failed, now_timestamp(), Some(message))
+                .await
+            {
+                tracing::error!(task_id = id, error = %update_error, "failed to roll back retry state");
+            }
+            self.events.changed(id);
+            return Err(error);
+        }
+
         self.events.changed(id);
         tracing::info!(task_id = id, "download task queued for retry");
-        self.enqueue(id.to_owned()).await;
+        self.enqueue_locked(id.to_owned(), &mut workers).await;
         Ok(())
     }
 
     pub async fn delete_task(&self, id: &str) -> Result<()> {
-        let task = self.store.get(id).await?;
-        if task.status.is_active() {
-            return Err(AppError::Validation("请先取消正在运行的任务".into()));
-        }
+        let task = self.store.delete_inactive(id).await?;
         let (_, temporary) = self.output_paths(&task)?;
         remove_file_if_exists(&temporary).await?;
-        self.store.delete(id).await?;
         self.events.changed(id);
         tracing::info!(task_id = id, "download task deleted");
         Ok(())
@@ -244,35 +260,62 @@ impl TaskManager {
         Ok(directories)
     }
 
-    async fn enqueue(self: &Arc<Self>, id: String) {
-        let (sender, receiver) = oneshot::channel();
-        self.cancellations.lock().await.insert(id.clone(), sender);
-        let manager = Arc::clone(self);
+    #[cfg(test)]
+    async fn enqueue(self: &Arc<Self>, id: String) -> Result<()> {
         let mut workers = self.workers.lock().await;
-        while let Some(result) = workers.try_join_next() {
+        if workers.shutting_down {
+            return Err(AppError::InvalidState);
+        }
+        self.enqueue_locked(id, &mut workers).await;
+        Ok(())
+    }
+
+    async fn enqueue_locked(self: &Arc<Self>, id: String, state: &mut WorkerState) {
+        state.next_generation = state.next_generation.wrapping_add(1);
+        let generation = state.next_generation;
+        let cancellation = CancellationToken::new();
+        self.cancellations.lock().await.insert(
+            id.clone(),
+            Cancellation {
+                generation,
+                token: cancellation.clone(),
+            },
+        );
+        let manager = Arc::clone(self);
+        while let Some(result) = state.workers.try_join_next() {
             if let Err(error) = result {
                 tracing::error!(%error, "download task ended unexpectedly");
             }
         }
-        workers.spawn(async move {
-            manager.run_task(&id, receiver).await;
-            manager.cancellations.lock().await.remove(&id);
+        state.workers.spawn(async move {
+            manager.run_task(&id, cancellation).await;
+            manager.remove_cancellation(&id, generation).await;
         });
     }
 
-    async fn run_task(&self, id: &str, mut cancellation: oneshot::Receiver<()>) {
+    async fn remove_cancellation(&self, id: &str, generation: u64) {
+        let mut cancellations = self.cancellations.lock().await;
+        if cancellations
+            .get(id)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            cancellations.remove(id);
+        }
+    }
+
+    async fn run_task(&self, id: &str, cancellation: CancellationToken) {
         let permit = tokio::select! {
             result = Arc::clone(&self.semaphore).acquire_owned() => match result {
                 Ok(permit) => permit,
                 Err(_) => return,
             },
-            _ = &mut cancellation => {
+            _ = cancellation.cancelled() => {
                 self.finish(id, TaskStatus::Cancelled, None).await;
                 return;
             }
         };
 
-        let result = self.download(id, cancellation).await;
+        let result = self.download(id, &cancellation).await;
         drop(permit);
         match result {
             Ok(RunOutcome::Completed) => self.finish(id, TaskStatus::Completed, None).await,
@@ -285,7 +328,7 @@ impl TaskManager {
         }
     }
 
-    async fn download(&self, id: &str, cancellation: oneshot::Receiver<()>) -> Result<RunOutcome> {
+    async fn download(&self, id: &str, cancellation: &CancellationToken) -> Result<RunOutcome> {
         let task = self.store.get(id).await?;
         let (output, temporary) = self.output_paths(&task)?;
         remove_file_if_exists(&temporary).await?;
@@ -296,21 +339,18 @@ impl TaskManager {
         let work_dir = self.config.temporary_root.join(format!(".{id}.work"));
         let raw = self.config.temporary_root.join(format!(".{id}.concat"));
         let downloader = HlsDownloader::new(self.config.concurrent_fragments)?;
-        let outcome = match downloader
-            .download(
-                &task.url,
-                &raw,
-                &work_dir,
-                cancellation,
-                move |percentage| self.set_progress(id, percentage, None),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let _ = remove_file_if_exists(&raw).await;
-                let _ = tokio::fs::remove_dir_all(&work_dir).await;
-                return Err(cleanup_after_error(&temporary, error).await);
+        let download = downloader.download(&task.url, &raw, &work_dir, move |percentage| {
+            self.set_progress(id, percentage, None)
+        });
+        let outcome = tokio::select! {
+            _ = cancellation.cancelled() => RunOutcome::Cancelled,
+            result = download => match result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let _ = remove_file_if_exists(&raw).await;
+                    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                    return Err(cleanup_after_error(&temporary, error).await);
+                }
             }
         };
 
@@ -321,9 +361,16 @@ impl TaskManager {
                 remove_file_if_exists(&temporary).await?;
             }
             RunOutcome::Completed => {
-                let remux = FfmpegRunner::new(&self.config.ffmpeg_bin)
-                    .remux_to_mp4(&raw, &temporary)
-                    .await;
+                let ffmpeg = FfmpegRunner::new(&self.config.ffmpeg_bin);
+                let remux = tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        let _ = remove_file_if_exists(&raw).await;
+                        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                        remove_file_if_exists(&temporary).await?;
+                        return Ok(RunOutcome::Cancelled);
+                    }
+                    result = ffmpeg.remux_to_mp4(&raw, &temporary) => result,
+                };
                 let _ = remove_file_if_exists(&raw).await;
                 let _ = tokio::fs::remove_dir_all(&work_dir).await;
                 if let Err(error) = remux {
@@ -430,7 +477,10 @@ fn collect_directories(
     children.sort_by_key(std::fs::DirEntry::file_name);
     for child in children {
         let file_type = child.file_type()?;
-        if !file_type.is_dir() || file_type.is_symlink() {
+        if !file_type.is_dir()
+            || file_type.is_symlink()
+            || child.file_name().to_string_lossy().starts_with('.')
+        {
             continue;
         }
         let path = child.path();
@@ -459,11 +509,20 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 async fn move_file_without_overwrite(from: &Path, to: &Path, task_id: &str) -> std::io::Result<()> {
-    if to.exists() {
-        return Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            "目标文件在下载期间被外部程序创建，未覆盖该文件",
-        ));
+    match tokio::fs::hard_link(from, to).await {
+        Ok(()) => {
+            if let Err(error) = tokio::fs::remove_file(from).await {
+                tracing::warn!(path = %from.display(), %error, "published file but failed to remove temporary source");
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "目标文件在下载期间被外部程序创建，未覆盖该文件",
+            ));
+        }
+        Err(_) => {}
     }
 
     let stem = to
@@ -471,34 +530,24 @@ async fn move_file_without_overwrite(from: &Path, to: &Path, task_id: &str) -> s
         .and_then(|value| value.to_str())
         .unwrap_or("download");
     let staged = to.with_file_name(format!(".{stem}.{task_id}.part.mp4"));
-    let moved = match tokio::fs::rename(from, &staged).await {
-        Ok(()) => true,
-        Err(_) => {
-            let copy_result = async {
-                let mut source = tokio::fs::File::open(from).await?;
-                let mut target = tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&staged)
-                    .await?;
-                tokio::io::copy(&mut source, &mut target).await?;
-                target.sync_all().await
-            }
-            .await;
-            if let Err(error) = copy_result {
-                let _ = tokio::fs::remove_file(&staged).await;
-                return Err(error);
-            }
-            false
-        }
-    };
+    let mut target = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .await?;
+    let copy_result = async {
+        let mut source = tokio::fs::File::open(from).await?;
+        tokio::io::copy(&mut source, &mut target).await?;
+        target.sync_all().await
+    }
+    .await;
+    if let Err(error) = copy_result {
+        let _ = tokio::fs::remove_file(&staged).await;
+        return Err(error);
+    }
 
     if let Err(error) = tokio::fs::hard_link(&staged, to).await {
-        if moved {
-            let _ = tokio::fs::rename(&staged, from).await;
-        } else {
-            let _ = tokio::fs::remove_file(&staged).await;
-        }
+        let _ = tokio::fs::remove_file(&staged).await;
         return Err(if error.kind() == ErrorKind::AlreadyExists {
             std::io::Error::new(
                 ErrorKind::AlreadyExists,
@@ -508,9 +557,12 @@ async fn move_file_without_overwrite(from: &Path, to: &Path, task_id: &str) -> s
             error
         });
     }
-    tokio::fs::remove_file(&staged).await?;
-    if !moved {
-        tokio::fs::remove_file(from).await?;
+
+    if let Err(error) = tokio::fs::remove_file(&staged).await {
+        tracing::warn!(path = %staged.display(), %error, "published file but failed to remove staged file");
+    }
+    if let Err(error) = tokio::fs::remove_file(from).await {
+        tracing::warn!(path = %from.display(), %error, "published file but failed to remove temporary source");
     }
     Ok(())
 }
@@ -527,6 +579,108 @@ async fn cleanup_after_error(path: &Path, error: AppError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manager() -> Arc<TaskManager> {
+        let root = std::env::temp_dir().join(format!("tessora-manager-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        TaskManager::new(Config {
+            download_root: root.clone(),
+            temporary_root: root,
+            ffmpeg_bin: "ffmpeg".into(),
+            concurrent_fragments: 1,
+            max_concurrent_downloads: 1,
+            media_settle_seconds: 0,
+        })
+    }
+
+    fn task(id: &str, status: TaskStatus) -> DownloadTask {
+        DownloadTask {
+            id: id.into(),
+            url: "https://example.com/video.m3u8".into(),
+            directory: String::new(),
+            file_name: format!("{id}.mp4"),
+            status,
+            progress: None,
+            error: None,
+            created_at: 1,
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn old_worker_does_not_remove_new_generation_cancellation() {
+        let manager = manager();
+        manager.cancellations.lock().await.insert(
+            "one".into(),
+            Cancellation {
+                generation: 2,
+                token: CancellationToken::new(),
+            },
+        );
+
+        manager.remove_cancellation("one", 1).await;
+        assert_eq!(
+            manager
+                .cancellations
+                .lock()
+                .await
+                .get("one")
+                .map(|entry| entry.generation),
+            Some(2)
+        );
+
+        manager.remove_cancellation("one", 2).await;
+        assert!(!manager.cancellations.lock().await.contains_key("one"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_retry_and_new_workers() {
+        let manager = manager();
+        manager
+            .store
+            .reserve_and_insert(task("one", TaskStatus::Failed))
+            .await
+            .unwrap();
+        manager.shutdown().await;
+
+        assert!(matches!(
+            manager.retry_task("one").await,
+            Err(AppError::InvalidState)
+        ));
+        assert!(matches!(
+            manager.enqueue("missing".into()).await,
+            Err(AppError::InvalidState)
+        ));
+        assert_eq!(
+            manager.store.get("one").await.unwrap().status,
+            TaskStatus::Failed
+        );
+        let workers = manager.workers.lock().await;
+        assert!(workers.workers.is_empty());
+        assert_eq!(workers.next_generation, 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_marks_the_current_run_as_cancelled() {
+        let manager = manager();
+        manager
+            .store
+            .reserve_and_insert(task("one", TaskStatus::Queued))
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        manager.cancellations.lock().await.insert(
+            "one".into(),
+            Cancellation {
+                generation: 1,
+                token: token.clone(),
+            },
+        );
+
+        manager.cancel_task("one").await.unwrap();
+        assert!(token.is_cancelled());
+    }
 
     #[tokio::test]
     async fn publishes_without_overwriting_an_existing_file() {
